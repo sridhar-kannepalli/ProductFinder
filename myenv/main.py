@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 from langchain_core.prompts import PromptTemplate
-from langchain.chains import LLMChain
 from langchain_ollama import OllamaLLM
 
 # 1. Page Config
@@ -24,7 +23,7 @@ st.title("🛒 Product Finder AI")
 # 2. Local LLM Setup
 @st.cache_resource
 def get_llm():
-    return OllamaLLM(model="qwen2.5-vl")
+    return OllamaLLM(model="qwen2.5vl")
 
 try:
     llm = get_llm()
@@ -43,7 +42,7 @@ User Request: {user_request}
 
 Category:"""
 category_prompt = PromptTemplate(template=category_template, input_variables=["user_request"])
-category_chain = LLMChain(llm=llm, prompt=category_prompt)
+category_chain = category_prompt | llm
 
 intent_template = """You are an intent extraction AI. The user was just viewing a product.
 They can either choose to view another product in the same category, or start all over again.
@@ -55,7 +54,7 @@ User Request: {user_request}
 
 Intent:"""
 intent_prompt = PromptTemplate(template=intent_template, input_variables=["user_request"])
-intent_chain = LLMChain(llm=llm, prompt=intent_prompt)
+intent_chain = intent_prompt | llm
 
 
 # State Init
@@ -102,8 +101,8 @@ if user_input := st.chat_input("Type your message here..."):
     if st.session_state.step == 1:
         with st.chat_message("assistant"):
             with st.spinner("Finding Category..."):
-                response = category_chain.invoke({"user_request": user_input})
-                category_raw = response['text'].strip().lower()
+                response_text = category_chain.invoke({"user_request": user_input})
+                category_raw = response_text.strip().lower()
                 
                 valid_cat = None
                 for vc in ['electronics', 'jewelery', "men's clothing", "women's clothing"]:
@@ -131,7 +130,12 @@ if user_input := st.chat_input("Type your message here..."):
     elif st.session_state.step == 2:
         try:
             prod_id = int(user_input.strip())
-            product = next((p for p in st.session_state.products if p['id'] == prod_id), None)
+            
+            res_products = requests.get("https://fakestoreapi.com/products")
+            product = None
+            if res_products.status_code == 200:
+                dataset = res_products.json()
+                product = next((p for p in dataset if p['id'] == prod_id), None)
             
             if product:
                 st.session_state.selected_product = product
@@ -160,8 +164,8 @@ if user_input := st.chat_input("Type your message here..."):
     elif st.session_state.step == 3:
         with st.chat_message("assistant"):
             with st.spinner("Processing..."):
-                response = intent_chain.invoke({"user_request": user_input})
-                intent = response['text'].strip().upper()
+                response_text = intent_chain.invoke({"user_request": user_input})
+                intent = response_text.strip().upper()
                 
                 if "START_OVER" in intent or "START OVER" in intent or "ALL OVER" in user_input.upper():
                     st.session_state.step = 1
