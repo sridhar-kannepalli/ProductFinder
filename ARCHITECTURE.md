@@ -113,37 +113,51 @@ The app combines an **Intent Router** with a **3-step state machine** driven by 
 
 #### ▶ Global Intent Routing (The Q&A Escape Hatch)
 
-**Trigger:** Any new message submitted by the user.
+**Trigger:** Any new message submitted by the user OR clicking a "Select ID" button in the chat.
 
 **What happens:**
-1. The message is checked against a regex: `r'(?i)\bid\s*(\d+)\b'`.
-   - If a match is found (e.g., *"id 20"*), the app fetches the catalog, matches the ID, and immediately jumps to the **Step 2/3 Product View**. 
-   - If the ID does not exist, the app notifies the user and resets to **Step 1**.
-2. If no direct ID is found, the message is passed to `router_chain`.
-   - **STRICT RULE**: "Do you have..." or "Is X available?" questions are strictly routed to `QUESTION`.
-   - If the user is asking a general question:
-     - The app fetches `fetch_all_products_cached()` and formats it into a compressed string.
-     - The app passes the catalog string and chat history to `qa_chain` (which uses Fuzzy Matching for items like "smartwatch" vs "watch").
-     - The answer is printed and saved to history, and the script calls `st.rerun()`.
-3. If the user asks to "browse shoes" or generic category switches, the intent is `CATEGORY`, and the app resets `step` to `1`.
+1. **Button Interception**: In the history rendering loop, if a message contains `selectable_products`, the app renders a set of **Streamlit Buttons** (e.g., *"Select ID: 20"*). Clicking these immediately updates `st.session_state` and jumps to the **Step 3 Product View**.
+2. **Flexible ID Matching**: A helper function `get_id_from_text` uses a regex `r'(?i)\b(?:id\s*)?(\d+)\b'` to extract IDs from strings.
+3. **Regex Interception**: The user's chat input is checked for an explicit "Id [number]" command. If found, it jumps to the product details.
+4. **Router Chain**: Classifies the intent (QUESTION, CATEGORY, or FLOW).
+5. **QA Chain with Auto-Linking**: Handles availability and fuzzy matching. 
+   - **Interactive Q&A**: If the AI's response contains product IDs (e.g., *"ID: 15"*), the app automatically extracts them and provides **"Select ID"** buttons below the answer, allowing the user to jump straight to product details from a question.
+
+---
+
+#### ▶ Global Interactions (Persistent Footer)
+**Trigger:** Always rendered after the chat history loop.
+- **🔄 Search different product**: Resets the app state to **Step 1** (Category Selection), clears conversation context, and allows browsing a different category.
+- **❓ I have a question**: Prompts the user to ask catalog-related questions (features, pricing, availability).
+
+---
+
+#### ▶ Product Display & Interactions
+**Trigger:** Any message with a `product` payload (Step 2/3).
+- **Rich Product Card**: Displays title, price, image, and description.
+- **Add to cart**: Confirms the purchase (specific to the product card).
 
 ---
 
 #### ▶ Step 1 — Category Discovery
-**Trigger:** Start of the flow, assuming the router detected `FLOW` or a `CATEGORY` switch.
-- User types a free-form product request (e.g. *"I'm looking for a phone"*).
-- `category_chain` extracts the matching category (clothes, electronics, furniture, shoes, miscellaneous).
-- The app fetches `GET https://api.escuelajs.co/api/v1/products` and locally filters for products where `category.name` matches.
-- The list of product IDs and titles is displayed to the user.
-- Transitions to **Step 2**.
+**Trigger:** Start of the flow OR clicking "Search different product."
+- **Automated Category Filtration**: To ensure a clean experience, the app filters categories from the raw API response using three criteria:
+  1. **Usage Check**: Only categories actually associated with at least one product in the current catalog are included.
+  2. **Sanitization**: Categories with names containing "test", "junk", or "category" are excluded.
+  3. **Data Quality**: Explicitly excludes known misspelled or placeholder items (e.g., "grosery").
+- **Interactive Buttons**: Instead of text prompts, the bot renders a **3-column grid of buttons** representing each valid category.
+- **One-Click Filtering**: Clicking a button immediately:
+  1. Sets `st.session_state.category`.
+  2. Pre-fetches the matching products from the full catalog.
+  3. Transitions to **Step 2** (Product List).
+- **Manual Input**: If the user types a category manually, the `category_chain` still extracts it as a fallback.
 
 #### ▶ Step 2 — Product ID Selection
-**Trigger:** After Step 1 displays the product list and the user types a numeric ID.
-- The app attempts to parse input as an integer.
-- The app fetches the **complete product catalogue** from `GET https://api.escuelajs.co/api/v1/products`.
-- It iterating through the full dataset to find a matching `product['id']`.
-- If matched, fields are extracted (utilizing the `images` array), saved to `st.session_state.selected_product`, and rendered in chat alongside an Add to Cart button.
-- Transitions to **Step 3**.
+**Trigger:** After Step 1 displays the product list.
+- User enters a numeric ID or "Id [number]", or clicks a "Select ID" button.
+- The app uses `get_id_from_text` to parse the input or handles the button click event.
+- If match found, transitions to **Step 3**.
+
 
 #### ▶ Step 3 — Post-Viewing Intent
 **Trigger:** After rendering the product card, user responds with an action.
@@ -176,8 +190,8 @@ The chat history (`st.session_state.messages`) is rendered on every rerun. Each 
 
 ```
 ProductFinder/
-├── myenv/
-│   └── main.py          # Main application (routing, LLM, and flow logic)
+├── main.py              # Main application (routing, LLM, and flow logic)
+├── myenv/               # Project virtual environment (conda)
 ├── requirements.txt     # Python dependencies
 └── ARCHITECTURE.md      # This document
 ```

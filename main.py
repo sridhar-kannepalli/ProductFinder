@@ -33,11 +33,54 @@ def fetch_all_products_cached():
         return res.json()
     return []
 
+@st.cache_data(ttl=3600)
+def fetch_categories_cached():
+    # 1. Fetch all products to see which categories are actually in use
+    products = fetch_all_products_cached()
+    used_category_ids = set(p.get('category', {}).get('id') for p in products if p.get('category'))
+    
+    # 2. Fetch all categories
+    res = requests.get("https://api.escuelajs.co/api/v1/categories")
+    if res.status_code == 200:
+        all_cats = res.json()
+        
+        # 3. Filter criteria:
+        # - Must have active products (ID must be in used_category_ids)
+        # - Exclude "test", "grosery", "junk", etc.
+        # - Priority for standard names: Clothes, Electronics, Furniture, Shoes, Miscellaneous
+        
+        filtered = []
+        exclude_terms = ["test", "grosery", "junk", "category"]
+        
+        for c in all_cats:
+            name = c.get('name', '').lower().strip()
+            cid = c.get('id')
+            
+            # Check if used and not junk
+            is_used = cid in used_category_ids
+            is_junk = any(term in name for term in exclude_terms)
+            
+            if is_used and not is_junk:
+                filtered.append(c)
+        
+        return filtered
+    return []
+
 try:
     llm = get_llm()
 except Exception as e:
     st.error(f"Error loading local LLM: {e}")
     st.stop()
+
+# Helper for flexible ID matching
+def get_id_from_text(text):
+    if not text:
+        return None
+    # Matches just numeric "12" or "Id 12" / "ID 12"
+    match = re.search(r'(?i)\b(?:id\s*)?(\d+)\b', text.strip())
+    if match:
+        return int(match.group(1))
+    return None
     
 # Chains
 category_template = """You are an intent extraction AI. Find the product category from the user request.
@@ -110,8 +153,13 @@ qa_chain = qa_prompt | llm
 if "step" not in st.session_state:
     st.session_state.step = 1
 if "messages" not in st.session_state:
+    cats = fetch_categories_cached()
     st.session_state.messages = [
-        {"role": "assistant", "content": "Welcome! What kind of product are you looking for? (e.g., electronics, men's clothing, women's clothing, miscellaneous)"}
+        {
+            "role": "assistant", 
+            "content": "Welcome! What kind of product are you looking for? Please select a category below:",
+            "selectable_categories": cats
+        }
     ]
 if "category" not in st.session_state:
     st.session_state.category = None
@@ -126,6 +174,45 @@ for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         
+        # New: Render selectable product buttons if available
+        if "selectable_products" in msg:
+            for p in msg["selectable_products"]:
+                # Render a button for each product
+                if st.button(f"Select ID: {p['id']} | {p['title']}", key=f"sel_{p['id']}_{idx}"):
+                    st.session_state.selected_product = p
+                    st.session_state.step = 3
+                    
+                    # Add confirmation message to chat
+                    reply = f"You selected **{p['title']}** (ID: {p['id']}). Here are the details. Would you like to view another product, or start all over again?"
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": reply,
+                        "product": p
+                    })
+                    st.rerun()
+
+        # New: Render selectable category buttons if available
+        if "selectable_categories" in msg:
+            cols = st.columns(3)
+            for cidx, cat in enumerate(msg["selectable_categories"]):
+                with cols[cidx % 3]:
+                    if st.button(cat['name'], key=f"catbtn_{cat['id']}_{idx}"):
+                        st.session_state.category = cat['name']
+                        st.session_state.step = 2
+                        
+                        # Pre-fetch products
+                        all_products = fetch_all_products_cached()
+                        st.session_state.products = [p for p in all_products if str((p.get('category') or {}).get('name') or '').lower().strip() == cat['name'].lower().strip()]
+                        
+                        # Add confirmation to history
+                        reply = f"I found **{len(st.session_state.products)}** products in '{cat['name']}'. Please click a button below or enter the ID number to see details."
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "content": reply,
+                            "selectable_products": st.session_state.products
+                        })
+                        st.rerun()
+
         # If this is a message where we showed a product (appended specially as dict with product details), we can render it.
         if "product" in msg:
             p = msg["product"]
@@ -145,12 +232,34 @@ for idx, msg in enumerate(st.session_state.messages):
                 st.image(img_url, width=200)
             st.write(f"**Description:** {p['description']}")
             
-            # Since buttons rerender, we should only enable the button if it's the latest product interaction?
-            # Or just render the button. 
-            # Give it a unique key based on idx and product id.
             if st.button("Add to cart", key=f"cart_{p['id']}_{idx}"):
                 st.success("Thank you for your purchase!")
 
+
+# Always show global actions at the bottom of the current chat state
+if len(st.session_state.messages) > 0:
+    st.write("---")
+    gcol1, gcol2 = st.columns(2)
+    with gcol1:
+        if st.button("🔄 Search different product", key="global_reset"):
+            st.session_state.step = 1
+            st.session_state.category = None
+            st.session_state.products = []
+            st.session_state.selected_product = None
+            cats = fetch_categories_cached()
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": "Starting over! What kind of product are you looking for? Please select a category:",
+                "selectable_categories": cats
+            })
+            st.rerun()
+    with gcol2:
+        if st.button("❓ I have a question", key="global_question"):
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": "I'm here to help! Please ask any question about the products I sell (e.g., about features, prices, or availability)."
+            })
+            st.rerun()
 
 if user_input := st.chat_input("Type your message here..."):
     # Append user's text
@@ -158,9 +267,12 @@ if user_input := st.chat_input("Type your message here..."):
     with st.chat_message("user"):
         st.write(user_input)
         
-    id_match = re.search(r'(?i)\bid\s*(\d+)\b', user_input)
-    if id_match:
-        prod_id = int(id_match.group(1))
+    prod_id = get_id_from_text(user_input)
+    # Check if this was a standalone ID or "Id X" command
+    # Only trigger if it's explicitly "Id X" or if we are in Step 2
+    is_explicit_id = re.search(r'(?i)\bid\s*\d+\b', user_input)
+    
+    if is_explicit_id:
         catalog = fetch_all_products_cached()
         product = next((p for p in catalog if p['id'] == prod_id), None)
         
@@ -215,8 +327,19 @@ if user_input := st.chat_input("Type your message here..."):
                     "user_request": user_input
                 }))
                 
+                # Extract IDs for selectable buttons
+                found_ids = re.findall(r'(?i)ID:\s*(\d+)', answer)
+                selectable = []
+                if found_ids:
+                    found_ids = [int(i) for i in found_ids]
+                    selectable = [p for p in catalog if p['id'] in found_ids]
+                
                 st.write(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": answer,
+                    "selectable_products": selectable
+                })
         st.rerun()
         
     if st.session_state.step == 1:
@@ -242,9 +365,12 @@ if user_input := st.chat_input("Type your message here..."):
                     st.session_state.category = valid_cat
                     st.session_state.step = 2
                     
-                    product_list = "\n".join([f"- **ID:** {p['id']} | {p['title']}" for p in st.session_state.products])
-                    reply = f"I found these products in '{valid_cat}':\n\n{product_list}\n\nPlease enter the ID of the product to know more."
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    reply = f"I found **{len(st.session_state.products)}** products in '{valid_cat}'. Please click a button below or enter the ID number to see details."
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": reply,
+                        "selectable_products": st.session_state.products
+                    })
                     st.rerun()
                 else:
                     err_reply = f"Sorry, I couldn't fetch products for '{valid_cat}'. Could you try again?"
@@ -252,9 +378,8 @@ if user_input := st.chat_input("Type your message here..."):
                     st.rerun()
                     
     elif st.session_state.step == 2:
-        try:
-            prod_id = int(user_input.strip())
-            
+        prod_id = get_id_from_text(user_input)
+        if prod_id is not None:
             res_products = requests.get("https://api.escuelajs.co/api/v1/products")
             product = None
             if res_products.status_code == 200:
@@ -279,9 +404,9 @@ if user_input := st.chat_input("Type your message here..."):
                     st.write(reply)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     
-        except ValueError:
+        else:
             with st.chat_message("assistant"):
-                reply = "Please enter a valid numeric ID."
+                reply = "Please enter a valid numeric ID (e.g. 12) or 'Id 12'."
                 st.write(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
                 
@@ -297,13 +422,21 @@ if user_input := st.chat_input("Type your message here..."):
                     st.session_state.products = []
                     st.session_state.selected_product = None
                     
-                    reply = "Starting over! What kind of product are you looking for? (e.g., electronics, jewelery, men's clothing, women's clothing)"
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    cats = fetch_categories_cached()
+                    reply = "Starting over! What kind of product are you looking for? Please select a category:"
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": reply,
+                        "selectable_categories": cats
+                    })
                     st.rerun()
                 else:
                     st.session_state.step = 2
-                    product_list = "\n".join([f"- **ID:** {p['id']} | {p['title']}" for p in st.session_state.products])
-                    reply = f"Here are the products in '{st.session_state.category}' again:\n\n{product_list}\n\nPlease enter the ID of the product to know more."
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    reply = f"Here are the products in '{st.session_state.category}' again. Please click a button below or enter the ID."
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": reply,
+                        "selectable_products": st.session_state.products
+                    })
                     st.session_state.selected_product = None
                     st.rerun()
